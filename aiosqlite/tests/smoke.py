@@ -153,6 +153,27 @@ class SmokeTest(aiounittest.AsyncTestCase):
 
         assert len(rows) == 10
 
+    async def test_cursor_return_self(self):
+        async with aiosqlite.connect(TEST_DB) as db:
+            cursor = await db.cursor()
+
+            result = await cursor.execute(
+                "create table test_cursor_return_self (i integer, k integer)"
+            )
+            self.assertEqual(result, cursor, "cursor execute returns itself")
+
+            result = await cursor.executemany(
+                "insert into test_cursor_return_self values (?, ?)", [(1, 1), (2, 2)]
+            )
+            self.assertEqual(result, cursor)
+
+            result = await cursor.executescript(
+                "insert into test_cursor_return_self values (3, 3);"
+                "insert into test_cursor_return_self values (4, 4);"
+                "insert into test_cursor_return_self values (5, 5);"
+            )
+            self.assertEqual(result, cursor)
+
     async def test_connection_properties(self):
         async with aiosqlite.connect(TEST_DB) as db:
             self.assertEqual(db.total_changes, 0)
@@ -255,3 +276,44 @@ class SmokeTest(aiounittest.AsyncTestCase):
             async with db.execute("SELECT one_arg(10);") as res:
                 row = await res.fetchone()
                 self.assertEqual(row[0], 20)
+
+    async def test_set_trace_callback(self):
+        statements = []
+
+        def callback(statement: str):
+            statements.append(statement)
+
+        async with aiosqlite.connect(TEST_DB) as db:
+            await db.set_trace_callback(callback)
+
+            await db.execute("select 10")
+            self.assertIn("select 10", statements)
+
+    async def test_connect_error(self):
+        bad_db = Path("/something/that/shouldnt/exist.db")
+        with self.assertRaisesRegex(OperationalError, "unable to open database"):
+            async with aiosqlite.connect(bad_db) as db:
+                self.assertIsNone(db)  # should never be reached
+
+        with self.assertRaisesRegex(OperationalError, "unable to open database"):
+            db = await aiosqlite.connect(bad_db)
+            self.assertIsNone(db)  # should never be reached
+
+    async def test_iterdump(self):
+        async with aiosqlite.connect(":memory:") as db:
+            await db.execute("create table foo (i integer, k charvar(250))")
+            await db.executemany(
+                "insert into foo values (?, ?)", [(1, "hello"), (2, "world")]
+            )
+
+            lines = [line async for line in db.iterdump()]
+            self.assertEqual(
+                lines,
+                [
+                    "BEGIN TRANSACTION;",
+                    "CREATE TABLE foo (i integer, k charvar(250));",
+                    "INSERT INTO \"foo\" VALUES(1,'hello');",
+                    "INSERT INTO \"foo\" VALUES(2,'world');",
+                    "COMMIT;",
+                ],
+            )

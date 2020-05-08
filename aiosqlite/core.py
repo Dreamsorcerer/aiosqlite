@@ -12,7 +12,17 @@ from functools import partial
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
-from typing import Any, Callable, Generator, Iterable, Optional, Tuple, Type, Union
+from typing import (
+    Any,
+    AsyncIterator,
+    Callable,
+    Generator,
+    Iterable,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
 from .context import contextmanager
 
@@ -43,19 +53,24 @@ class Cursor:
         """Execute the given function on the shared connection's thread."""
         return await self._conn._execute(fn, *args, **kwargs)
 
-    async def execute(self, sql: str, parameters: Iterable[Any] = None) -> None:
+    async def execute(self, sql: str, parameters: Iterable[Any] = None) -> "Cursor":
         """Execute the given query."""
         if parameters is None:
             parameters = []
         await self._execute(self._cursor.execute, sql, parameters)
+        return self
 
-    async def executemany(self, sql: str, parameters: Iterable[Iterable[Any]]) -> None:
+    async def executemany(
+        self, sql: str, parameters: Iterable[Iterable[Any]]
+    ) -> "Cursor":
         """Execute the given multiquery."""
         await self._execute(self._cursor.executemany, sql, parameters)
+        return self
 
-    async def executescript(self, sql_script: str) -> None:
+    async def executescript(self, sql_script: str) -> "Cursor":
         """Execute a user script."""
         await self._execute(self._cursor.executescript, sql_script)
+        return self
 
     async def fetchone(self) -> Optional[sqlite3.Row]:
         """Fetch a single row."""
@@ -63,7 +78,7 @@ class Cursor:
 
     async def fetchmany(self, size: int = None) -> Iterable[sqlite3.Row]:
         """Fetch up to `cursor.arraysize` number of rows."""
-        args = ()  # type: Tuple[int, ...]
+        args: Tuple[int, ...] = ()
         if size is not None:
             args = (size,)
         return await self._execute(self._cursor.fetchmany, *args)
@@ -115,10 +130,10 @@ class Connection(Thread):
     ) -> None:
         super().__init__()
         self._running = True
-        self._connection = None  # type: Optional[sqlite3.Connection]
+        self._connection: Optional[sqlite3.Connection] = None
         self._connector = connector
         self._loop = loop
-        self._tx = Queue()  # type: Queue
+        self._tx: Queue = Queue()
 
     @property
     def _conn(self) -> sqlite3.Connection:
@@ -141,7 +156,11 @@ class Connection(Thread):
         return cursor.fetchall()
 
     def run(self) -> None:
-        """Execute function calls on a separate thread."""
+        """
+        Execute function calls on a separate thread.
+
+        :meta private:
+        """
         while self._running:
             try:
                 future, function = self._tx.get(timeout=0.1)
@@ -169,7 +188,13 @@ class Connection(Thread):
     async def _connect(self) -> "Connection":
         """Connect to the actual sqlite database."""
         if self._connection is None:
-            self._connection = await self._execute(self._connector)
+            try:
+                self._connection = await self._execute(self._connector)
+            except Exception:
+                self._running = False
+                self._connection = None
+                raise
+
         return self
 
     def __await__(self) -> Generator[Any, None, "Connection"]:
@@ -197,7 +222,10 @@ class Connection(Thread):
 
     async def close(self) -> None:
         """Complete queued queries/cursors and close the connection."""
-        await self._execute(self._conn.close)
+        try:
+            await self._execute(self._conn.close)
+        except Exception:
+            LOG.exception("exception occurred while closing connection")
         self._running = False
         self._connection = None
 
@@ -294,6 +322,51 @@ class Connection(Thread):
         self, handler: Callable[[], Optional[int]], n: int
     ) -> None:
         await self._execute(self._conn.set_progress_handler, handler, n)
+
+    async def set_trace_callback(self, handler: Callable) -> None:
+        await self._execute(self._conn.set_trace_callback, handler)
+
+    async def iterdump(self) -> AsyncIterator[str]:
+        """
+        Return an async iterator to dump the database in SQL text format.
+
+        Example::
+
+            async for line in db.iterdump():
+                ...
+
+        """
+        dump_queue: Queue = Queue()
+
+        def dumper():
+            try:
+                for line in self._conn.iterdump():
+                    dump_queue.put_nowait(line)
+                dump_queue.put_nowait(None)
+
+            except Exception:
+                LOG.exception("exception while dumping db")
+                dump_queue.put_nowait(None)
+                raise
+
+        fut = self._execute(dumper)
+        task = asyncio.ensure_future(fut)
+
+        while True:
+            try:
+                line: Optional[str] = dump_queue.get_nowait()
+                if line is None:
+                    break
+                yield line
+
+            except Empty:
+                if task.done():
+                    LOG.warning("iterdump completed unexpectedly")
+                    break
+
+                await asyncio.sleep(0.01)
+
+        await task
 
 
 def connect(

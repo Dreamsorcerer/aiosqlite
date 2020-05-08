@@ -21,7 +21,7 @@ from sqlite3 import (  # pylint: disable=redefined-builtin
 from .core import Connection, Cursor, connect
 from .pool import create_pool, Pool
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 __all__ = [
     "__version__",
     "create_pool",
