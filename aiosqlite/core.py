@@ -19,6 +19,7 @@ from .context import contextmanager
 __all__ = ["connect", "Connection", "Cursor"]
 
 LOG = logging.getLogger("aiosqlite")
+TIMEOUT = 60.0
 
 
 class Cursor:
